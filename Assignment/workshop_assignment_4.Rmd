@@ -1,0 +1,1201 @@
+---
+title: "DSEM workshop"
+author: "Jessica Schaaf and Michael Aristodemou"
+date: "February 2025"
+output:
+  html_document:
+    code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Welcome to this tutorial on Dynamic Structural Equation Models (DSEMs; [Asparouhov et al., 2018](https://www.tandfonline.com/doi/full/10.1080/10705511.2017.1406803); [McNeish et al., 2020](https://oce.ovid.com/article/00060744-202010000-00005/HTML)) and how to fit them in Stan! This tutorial requires basic R skills. Some experience with timeseries modeling and/or Stan is helpful but not required. After completing this tutorial, you will be able to understand the basics of DSEM and Stan, to fit a DSEM with fixed and random effects in Stan, and hopefully to adjust the model to fit your own data.
+
+Below you see eight tabs. The first tab *Intro to DSEM* contains information on DSEMs and their parameters. The second tab *Install Stan* shows you how to install Stan on your device. The third tab *Get started* contains R code to load and format example data. The rest of the tabs contain step-by-step exercises to get used to fitting DSEMs in Stan.
+
+## Content {.tabset .tabset-pills}
+
+### Intro to DSEM
+
+This is a short introduction to DSEM, with pictures!
+
+DSEM is used to analyze time series data. Time series data has multiple observations for a given subject on one or multiple variables. For example, if we measure John's urge to smoke every day for 50 days we will get the kind of data we need. DSEM is also useful for when we have multiple observations for multiple subjects. Thus, it is instructive to think of DSEM as being composed of two models: (1) a within-subject model, describing a subject's mean and variation around that mean that happens over time and (2) a between-subject model, capturing how these subject-specific characteristics differ between subjects. The number of parameters in a DSEM can vary depending on the substantive question you would like to answer. In this workshop we will go over the most popular DSEM which consists of three parameters. In the figure below you can see a visual representation of the three-parameter DSEM. We will break down each of these parameters below using our running example of smoking urges. 
+
+![](https://github.com/mearistodemou/DSEM_workshop/raw/main/Figures/DSEM_full.PNG)
+
+<font size="5">**1. Mean urge to smoke ($\mu$)**</font>
+
+The mean describes the average of a subject's urge to smoke across all 50 days. This can be thought of as a stable point around which any variation happens. Subjects can differ in their mean value: as shown in the left panel of the figure below, the subject in <span style="color: blue;">blue</span> has a <span style="color: blue;">higher mean urge to smoke</span>. In the right panel, the model is described mathematically. We model a subject's mean urge to smoke ($\mu_{i}$) as the sum of a group-level mean ($\gamma_{1}$) and a subject-specific deviation from that group-level mean ($\upsilon_{1i}$). In such a hierarchical framework, group-level effects are called fixed effects and the *sds* of subject-specific effects are called random effects. Note that you estimate sds of subject-specific effects, because estimating all separate effects is computationally expensive (read: impossible).
+
+![](https://github.com/mearistodemou/DSEM_workshop/raw/main/Figures/mean_DSEMc.PNG)
+
+<font size="5">**2. Autoregression (AR-1; $\phi$)**</font>
+ 
+How much the urge to smoke on a given day differs from the mean urge across all 50 days is called a deviation. How much these deviations linger over time, that is, for how long subsequent urges will stay above or below the subject's mean urge, is captured by the autoregressive parameter. For example, when a subject with a <span style="color: blue;">higher positive autoregressive parameter</span> (<span style="color: blue;">blue</span> in left panel of the figure below) reports an urge to smoke that is higher than their mean urge, you can expect them to stay at that elevated level for longer than someone with a <span style="color: red;">lower autoregressive parameter</span> (<span style="color: red;">red</span> in left panel of figure). In the right panel, the statistical model again shows how a subject's autoregressive parameter ($\phi_{i}$) is composed of a group-level autoregressive parameter ($\gamma_{2}$) and a subject-specific deviation ($\upsilon_{2i}$).
+
+![](https://github.com/mearistodemou/DSEM_workshop/raw/main/Figures/ar1_DSEMc.png)
+
+<font size="5">**3. Innovations ($\psi$)**</font>
+
+After taking into account the variation in urges that is explained by autoregression, our model still doesn't fully capture all fluctuations. That is, we still have residual variation left. This residual variation is described by innovations. For example, two people who have the same level of urges on average and the same autoregression, may still differ in their day-to-day residual variation in their urges. In the left panel of the figure below, the two people shown are equal on all other parameters except their innovations (<span style="color: blue;">blue has greater residual sd</span>). As can be seen in the right panel of the figure below, the general structure of the innovations is the same as for the mean and autoregression: a subject's innovation ($\psi_{i}$) is composed of a group-level parameter ($\gamma_{3}$) and a subject-specific deviation ($\upsilon_{3i}$). You can ignore the exponential term for now, we explain it in the *N = 1 DSEM* module.
+
+![](https://github.com/mearistodemou/DSEM_workshop/raw/main/Figures/omega_DSEMc.PNG)
+
+To continue to the next module and start fitting your first DSEM go <a href="#top">back to the top</a>.
+
+### Install Stan
+
+**Windows**: Install Rtools (https://cran.r-project.org/bin/windows/Rtools/rtools43/rtools.html)
+
+**Mac**: Install Xcode command line tools by running `xcode-select --install` in the terminal.
+
+
+```{r class.source="fold-show", message=FALSE, warning=FALSE, eval=FALSE}
+#1. Remove prior stan downloads
+remove.packages("rstan")
+if (file.exists(".RData")) file.remove(".RData")
+# Restart R
+
+#2. Install rstan
+Sys.setenv(DOWNLOAD_STATIC_LIBV8 = 1) # only necessary for Linux without the nodejs library / headers
+install.packages("rstan", repos = "https://cloud.r-project.org/", dependencies = TRUE)
+
+#3. Verify installation (make sure this model converges)
+example(stan_model, package = "rstan", run.dontrun = TRUE)
+```
+
+### Get started
+Before we start coding, let's take care of some prerequisites. We need to access example data on smoking urges through GitHub and to restructure them a little to make them usable for Stan.
+
+**Exercise 0: Run the following code to (1) rename columns, (2) subset data, and (3) turn data into a list for Stan.**
+
+```{r class.source = "fold-show", loaddata, message=FALSE,warning=FALSE}
+#Load data
+library(dplyr)
+
+dat<-read.csv("https://raw.githubusercontent.com/mearistodemou/DSEM_workshop/main/Data/Two-Level%20Data.csv",header=F) #load McNeish data
+
+#####################
+# 1. Rename columns
+####################
+
+colnames(dat) <- c('urge',"dep",'js', "hs", 'subject', 'time') #rename columns
+
+#####################
+# 2. Subset data
+####################
+
+set.seed(5483)
+# Get unique account_id
+unique_id <- unique(dat$subject)
+
+# 2.1 Subset N = 20
+# Randomly select 20 participants
+subsample <- sample(unique_id, size = 20)
+dat_sub <- dat %>% filter(subject %in% subsample)
+
+# 2.2 Subset data (N = 1)
+dat_n1 <- dat_sub[which(dat_sub$subject == 5),]
+
+###############################
+# 3. Convert data into a list
+##############################
+
+# 3.1 Make list of variables and values for DSEM (N = 20)
+dsem_list <- list(N_subj = length(unique(dat_sub$subject)), # subject number
+                  Y = matrix(dat_sub$urge, 20, byrow = TRUE), # outcome variable matrix
+                  N_obs = length(unique(dat_sub$time))) # number of observations
+
+
+# 3.2 Make list of variables and values for DSEM (N = 1)
+dsem_list_N1 <- list(Y = dat_n1$urge, # outcome variable matrix
+                     N_obs = length(unique(dat_n1$time))) # number of observations
+
+```
+
+<a href="#top">On to model fitting!</a>
+
+### N = 1 DSEM
+
+We start with a simple version of a DSEM. That is, we estimate a DSEM for a single subject (N=1) with a mean and residual sd (no autoregression). As the data contain one subject, the model only includes fixed effects (no random ones).
+Mathematically, such a model is described as follows:
+
+\begin{equation}
+Y(t) = \mu + \epsilon(t)\label{eq1}\tag{1}
+\end{equation}
+
+where $Y$ indicates the subject's smoking urges across trials $t$, $\mu$ (mu) is the mean urge, and $\epsilon$ (epsilon) is the residual, that is, the deviation of the observed urges from the mean urge. In the figure below, the red dotted line represents the mean and the distance between the observed data points (black) and that red line represent the deviations.
+
+```{r plot_onepp}
+#Plot timeseries data from McNeish data from one subject here with line for mean in plot
+library(ggplot2)
+
+#Basic time series (connected over all trials)
+p3 <- ggplot(data = dat_n1, aes(x=time, y=urge))+ 
+  geom_point()+
+  geom_line()
+p3 <- p3 + geom_hline(yintercept=mean(dat_n1$urge), linewidth=1.5, linetype = 'dotted', col = 'red')
+p3 <- p3 + labs(x="Days", y = "Urge")+
+  theme_classic(base_size =  24)
+p3
+
+```
+
+We assume that each of these deviations comes from a common (normal) distribution with a mean 0 and a standard deviation which we denote with $\psi$ (psi). 
+
+<font size="5">**Stan in blocks**</font>
+
+Before we really get to model fitting, a small intermezzo on the workings of Stan. A Stan model is built up using [several blocks](https://mc-stan.org/docs/2_18/reference-manual/overview-of-stans-program-blocks.html). A simple model often requires a data block, a model block, and a parameters block.
+
+1. In the *data block*, you specify which data to run the model on.\
+2. In the *model block*, you specify the model to fit on the data.\
+3. In the *parameters block*, you specify which parameters to sample in the model.\
+
+You may also add a *transformed parameters block* (in which you specify parameter transformations), a *generated quantities block* (in which you compute additional outputs such as posterior predictives), and a *functions block* (in which you specify potential functions used in any of the other blocks). Importantly, the model block runs locally. So if you want to use variables or parameters in the generated quantities block, you need to specify these in the transformed parameters block (instead of the model block). But that is for later; let's go through the blocks one by one!
+
+<font size="5">**The "model" block**</font>
+
+Let's start by translating the model described above into Stan language. You do this in the model block. As a first step, you need to think about how the data are distributed. For simplicity, we assume data are distributed normally in this tutorial (however, your own data may be distributed differently). Stan uses the following notation for [normal distributions](https://mc-stan.org/docs/functions-reference/normal-distribution.html): data ~ normal(mean, sd). **Tip:** this page on [linear regression in Stan](https://mc-stan.org/docs/2_18/stan-users-guide/linear-regression.html) is a very helpful reference for the remainder of the workshop!
+
+**Exercise 1**: Write a [for loop](https://mc-stan.org/docs/2_18/reference-manual/for-loops.html) across trials (call this variable *N_obs*) in which you translate the model described above into Stan language. **Tip:** Stan uses square brackets *[..]* for [indexing](https://mc-stan.org/docs/reference-manual/language-indexing.html) (just like R). Always end lines of code in Stan with a semi-colon (*;*). 
+
+```{r class.source = "fold-show", model_step1}
+mymodel = "
+  model {
+    // Write your for loop and model here
+  }
+"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r model_step1-solution}
+mymodel = "
+  model {
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+  }
+"
+```
+
+Congratulations! You have created the basis of a DSEM. In the remainder, we make sure Stan knows what to do with it :)
+
+In Stan, you need to specify [the type of data and variables](https://mc-stan.org/docs/2_18/reference-manual/univariate-data-types-and-variable-declarations.html) you include. 
+
+**Exercise 2a**: Extend the model block from Exercise 1 by specifying that mu and psi are unconstrained real numbers. Don't forget to end each line with a semi-colon!
+
+```{r class.source = "fold-show", model_step2a}
+mymodel = "
+  model {
+    // Add declarations here
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+  }
+"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step2a}
+mymodel = "
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+  }
+"
+```
+
+In our simple model, we only model data for one subject. This means that the subject-specific parameters (mean $\mu$ and residual sd $\psi$) are equal to the fixed effects. That is, $\mu = \gamma_1$ and $\psi = \gamma_2$.
+
+**Exercise 2b**: Extend the model from Exercise 2b with lines of code in which you specify that the mean and residual sd are equal to the fixed effects. **Tip**: Use indexing to create two gammas.
+
+```{r class.source = "fold-show", model_step2b}
+mymodel = "
+  model {
+    real mu;                    // mean
+    real psi;                   // residual 
+    
+    // Add declarations here
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+
+  }
+"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step2b}
+mymodel = "
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }
+"
+```
+
+You have now declared mu and psi. However, there are still variables (N_obs and Y) and parameters (gamma[1] and gamma[2]) that Stan doesn't understand. We start by declaring the parameters. This is done in the parameters block.
+
+<font size="5">**The "parameters" block**</font>
+
+**Exercise 3**: Let's create a new block, a parameters block. In this block, declare that you have a [vector](https://mc-stan.org/docs/2_18/reference-manual/vector-and-matrix-data-types.html) of two parameters called gamma.
+
+```{r class.source = "fold-show", model_step3}
+mymodel = "
+  parameters {
+    // Add declarations here
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step3}
+mymodel = "
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }
+"
+```
+
+Good job! You're almost there. You still need to give Stan the number of observations and the timeseries data (outcome variable). You do this in another block, the data block.
+
+<font size="5">**The "data" block**</font>
+
+**Exercise 4**: Create a data block in which you specify the number of observations and the timeseries data (outcome variable). First think about the [variable type](https://mc-stan.org/docs/2_18/reference-manual/univariate-data-types-and-variable-declarations.html), whether or not the variables are constrained (i.e., does the number of observations have a lower or upper bound?), and the size of the variables. 
+
+```{r class.source = "fold-show", model_step4}
+mymodel = "
+  # Add data block here
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+
+  }
+"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step4}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+
+  }
+"
+```
+
+Stan uses Bayesian parameter estimation. It is beyond the scope of this tutorial to explain what Bayesian estimation is. If you want to know more about Bayesian statistics and estimation you could read [this paper](https://www.ejwagenmakers.com/2015/BayesianAnalysisEnclopedia.pdf). 
+
+To perform Bayesian estimation, we need to define prior distributions for the parameters. In this simple model, we included two parameters. Which ones?
+
+**Exercise 5a**: In the model block, specify a prior distribution for the fixed effects ($\gamma$s). Try to implement a normal distribution with a mean of zero and a large standard deviation (e.g., 1e6). Remember from Exercise 1 that such a specification follows the form data ~ normal(mean, sd). **Tip**: Stan uses [vectorization](https://mc-stan.org/docs/2_18/stan-users-guide/vectorization.html) so you don't need to specify the prior for the two fixed effects separately.
+
+```{r class.source = "fold-show", model_step5a}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    // Add prior here
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }
+"
+```
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step5a}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = gamma[2];             // subject-specific sd equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects (1e6 is shorthand for 1000000)
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }
+"
+```
+
+Is it likely that both fixed effects follow a normal distribution? Not really... sds such as the residual sd (psi) cannot be negative and are often skewed. What is usually done in DSEM is log-transforming the residual sd to approximate a normal distribution. 
+
+**Exercise 5b**: Modify the declaration of psi (i.e., "psi = gamma[2];") to make sure $\gamma_2$ is estimated on a logarithmic scale.
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step5b}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = exp(gamma[2]);        // subject-specific sd equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    for (t in 1:N_obs) {
+      Y[t] ~ normal(mu, psi);   // basic DSEM
+    }
+    
+  }
+"
+```
+
+DONE! Now you can run the model on data from the McNeish paper.
+
+<font size="5">**Fitting your model**</font>
+
+```{r class.source = "fold-show", message=FALSE, warning=FALSE, eval=TRUE}
+# R code for fitting the model here
+library(rstan)
+
+mod <- stan(model_code = mymodel, data = dsem_list_N1, 
+            verbose = FALSE, iter = 1000, chains = 4, 
+            cores = 4, init = 0)
+
+```
+
+```{r class.source = "fold-show", message=FALSE, eval=TRUE}
+# R code for quick inspection of results here
+print(mod, digits = 3, pars = c('gamma'))
+plot(mod, pars = c('gamma'))
+stan_dens(mod, pars = c('gamma'))
+```
+
+If everything ran correctly, the mean urge to smoke (gamma[1]) is estimated around zero and the log-transformed residual sd (gamma[2]) is estimated slightly above one. To ease interpretation, you could exponentiate the log-transformed residual sd, which will give you an sd of about three. These results, a mean of zero and a standard deviation of three, make sense if you look back at the figure at the top of this module.
+
+Let's make it a little more difficult in the <a href="#top">next module</a>!
+
+### Adding autoregression
+
+The DSEM in the previous section is incomplete. Specifically, it doesn't include a term for the (first-order) autoregression. The autoregression indicates how the deviation at the previous timepoint correlates with the score on the current timepoint. With a little algebra, we can rework Equation \eqref{eq1} (see *N = 1 DSEM* module) to obtain the deviation on the current timepoint:
+\begin{equation}
+\epsilon_{t} = Y_{t} - \mu\label{eq2}\tag{2}
+\end{equation}
+From this follows that the deviation on the previous timepoint is:
+
+\begin{equation}
+\epsilon_{t-1} = Y_{t-1} - \mu\label{eq3}\tag{3}
+\end{equation}
+
+A model including autoregression, which we coin $\phi$, can thus be described as:
+\begin{align}
+Y_{t} &= \mu + \phi \cdot \epsilon_{t-1} + \epsilon_{t} \\
+&= \mu + \phi \cdot (Y_{t-1} - \mu) + \epsilon_{t}\label{eq4}\tag{4}
+\end{align}
+**Hint:** Before continuing with the exercises, think about which parts of the code you need to adjust to now model the timeseries data using three instead of two parameters.
+
+**Exercise 6**: One of the things you need to do is augment the basic DSEM you created in Exercise 1 with an autoregression. Try to implement Equation \eqref{eq4} in the model block of your Stan model.
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step6}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[2] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = exp(gamma[2]);        // subject-specific sd equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    Y[1] = normal(mu, psi); // estimate first observation
+    for (t in 2:N_obs) {
+      Y[t] ~ normal(mu + phi*(Y[t-1] - mu), psi);   // three-parameter DSEM
+    }
+
+  }
+"
+```
+
+**Exercise 7**: You also need to (1) tell Stan that you now have three instead of two fixed effects (in the parameters block; see Exercise 3), (2) declare the new parameter (in the model block; see Exercise 2a), and (3) specify that the subject-specific autoregression is equal to the fixed effect (see Exercise 2b). Try to change these in your Stan code.
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step7}
+mymodel = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    vector[N_obs] Y;            // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    real phi;                   // autoregression
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = exp(gamma[2]);        // subject-specific sd equals fixed effect
+    phi = gamma[3];             // subject-specific autoregression equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    
+    Y[1] ~ normal(mu,psi); // estimate first observation
+    for (t in 2:N_obs) {
+      Y[t] ~ normal(mu + phi*(Y[t-1] - mu), psi);   // three-parameter DSEM
+    }
+  
+  }
+"
+```
+
+Now run your model and inspect the results!
+
+```{r class.source = "fold-show" , eval=TRUE, message=FALSE}
+# R code for fitting the model here
+library(rstan)
+
+mod <- stan(model_code = mymodel, data = dsem_list_N1, 
+            verbose = FALSE, iter = 1000, chains = 1, 
+            cores = 4, init = 0)
+
+# View results
+print(mod, digits = 3, pars = c('gamma'))
+plot(mod, pars = c('gamma'))
+stan_dens(mod, pars = c('gamma'))
+```
+
+As you can see, an additional parameter (gamma[3]) is estimated. This autoregressive parameter is estimated around 0.35, suggesting the subject's smoking urge carries over across days. In other words, if the subject experiences elevated urges today, they are more likely to experience elevated urges again tomorrow.
+
+Let's go on to find out how we can extend our model to examine how urges to smoke fluctuate across days in a given population. <a href="#top">Next module</a>.
+
+### N > 1 DSEM
+
+Now that we have a three-parameter DSEM, it would be nice to be able to fit the model on multiple subjects. First think about which parts of the model you need to adjust to allow it to estimate parameters for multiple subjects at once.
+
+**Exercise 8**: Let's start from the top. In the data block, we need to tell Stan how many subjects we have. Call this variable *N_subj*. **Tip**: Look back at Exercise 4. We also need to declare [a new structure](https://mc-stan.org/docs/reference-manual/overview-of-data-types.html) for our timeseries data as we now have multiple observations for multiple subjects.
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step8}
+mymodel1 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;            // fixed effects
+  }
+  
+  model {
+    real mu;                    // mean
+    real psi;                   // residual sd
+    real phi;                   // autoregression
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = exp(gamma[2]);        // subject-specific sd equals fixed effect
+    phi = gamma[3];             // subject-specific autoregression equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    Y[1] ~ normal(mu,psi); // estimate first observation
+    for (t in 2:N_obs) {
+      Y[t] ~ normal(mu + phi*(Y[t-1] - mu), psi);   // three-parameter DSEM
+    }
+    
+  }
+"
+```
+
+**Exercise 9**: In the model block, you also need to specify another structure for the subject-specific parameters as we now have N_subj $\mu$s, $\psi$s and $\phi$s. Can you implement that?
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step9}
+mymodel1 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;            // fixed effects
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    mu = gamma[1];              // subject-specific mean equals fixed effect
+    psi = exp(gamma[2]);        // subject-specific sd equals fixed effect
+    phi = gamma[3];             // subject-specific autoregression equals fixed effect
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    Y[1] ~ normal(mu,psi); // estimate first observation
+    for (t in 2:N_obs) {
+        Y[t] ~ normal(mu + phi*(Y[t-1] - mu), psi);   // three-parameter DSEM
+      }
+  }
+"
+```
+
+**Exercise 10**: Finally, in the model block, you need to add a for loop across subjects and subject indices within that loop. Which parts of the model are per subject? Try to implement it! **Tip**: Indexing in Stan can be done in "the R way", that is, x[a,b], but is usually done differently: x[a][b].
+
+**Answer (Click "Show" if you need some help)**
+
+```{r ans_step10}
+mymodel1 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;            // fixed effects
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    for (i in 1:N_subj) {
+      mu[i] = gamma[1];              // subject-specific mean equals fixed effect
+      psi[i] = exp(gamma[2]);        // subject-specific sd equals fixed effect
+      phi[i] = gamma[3];             // subject-specific autoregression equals fixed effect
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]);   // three-parameter DSEM
+      }
+    
+    }
+  }
+"
+```
+
+Great! You can now fit the model and get parameter estimates for every subject. Note that we are using a different dataset (with 20 subjects instead of 1) the list that we feed into Stan is also different. Take a moment to notice the changes.
+
+
+```{r class.source = "fold-show" , eval=TRUE, message=FALSE, warning=FALSE}
+library(rstan)
+
+#Make list of variables and values for DSEM (N = 20)
+dsem_list <- list(N_subj = length(unique(dat_sub$subject)), # subject number
+                  Y = matrix(dat_sub$urge, 20, byrow = TRUE), # outcome variable matrix
+                  N_obs = length(unique(dat_sub$time))) # number of observations
+
+# R code for fitting the model here
+mod <- stan(model_code = mymodel1, data = dsem_list, 
+            verbose = FALSE, iter = 500, chains = 4, 
+            cores = 4, init = 0)
+
+# View results
+print(mod, digits = 3, pars = c('gamma'))
+plot(mod, pars = c('gamma'))
+stan_dens(mod, pars = c('gamma'))
+
+```
+
+You've come a long way! You are now able to describe the average urges to smoke in our sample, how much deviations in people's urges linger on average, and how much residual fluctuation there is in people's urges. But not everyone's urge to smoke is represented by these sample averages. How can we account for these individual differences? We will find out in the <a href="#top">final section</a>.
+
+### Multilevel DSEM
+
+It is time to go hierarchical! In the previous module, you fitted a three-parameter DSEM to data from multiple subjects. However, you didn't allow subjects to differ in their parameters yet. That is, we modeled subject-specific parameters as fixed effects without estimating random effects. We now want to allow subjects to differ from each other. For this, we need to specify subject-specific deviations and estimate random effects.
+
+**Exercise 11**: In our previous models, we specified that subject-specific effects are equal to the fixed effects. Add subject-specific deviations to the definition of subject-specific effects. Call these deviations u. Remember that you can use indexing to create multiple u's at once.
+
+```{r ans_step11}
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    
+    for (i in 1:N_subj) {
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+**Exercise 12**: In the parameters block, declare the deviations added in Exercise 11. What structure do these deviations have? And what size? And what type of variable are we dealing with?
+
+```{r ans_step12}
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    array[N_subj] vector[3] u; //deviations
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    for (i in 1:N_subj) {
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+**Exercise 13**: Now that we added deviations to the model (Exercise 11) and declared them (Exercise 12), we need to specify a prior on the deviations. As with the prior on the fixed effects (Exercise 5a), you do this in the model block. We assume deviations are normally distributed with a mean of zero and an sd that we make a parameter. Call this parameter tau. This exercise is very similar to defining the prior on the fixed effects; apart from introducing the parameter tau, what is different?
+
+```{r ans_step13}
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    array[N_subj] vector[3] u; //deviations
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    
+    for (i in 1:N_subj) {
+      u[i] ~ normal(0, tau);    // distribution of deviations
+      
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+**Exercise 14**: In the previous exercise, we introduced a new parameter *tau*. Declare this parameter in the parameters block. What is the type? And the size? Does it have a lower or upper bound?
+
+```{r ans_step14}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    array[N_subj] vector[3] u; //deviations
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+  
+    for (i in 1:N_subj) {
+      u[i] ~ normal(0, tau);    // distribution of deviations
+    
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+**Exercise 15**: We also need to add a prior on this newly introduced parameter in the model block. As tau is a standard deviation, which cannot be negative, we use a [cauchy prior distribution](https://mc-stan.org/docs/functions-reference/cauchy-distribution.html). Set the location parameter (i.e., the first argument) to zero and the scale (i.e., the second argument) to 2.5.
+
+```{r ans_step15}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    array[N_subj] vector[3] u; //deviations
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    tau ~ cauchy(0,2.5);        // prior on random effects
+    
+    for (i in 1:N_subj) {
+      u[i] ~ normal(0, tau);    // distribution of deviations
+      
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+Now you can run the three-parameter DSEM model with random effects!
+
+```{r class.source = "fold-show" , eval=TRUE, message=FALSE,warning=FALSE}
+library(rstan)
+
+#Make list of variables and values for DSEM (N = 20)
+dsem_list <- list(N_subj = length(unique(dat_sub$subject)), # subject number
+                  Y = matrix(dat_sub$urge, 20, byrow = TRUE), # outcome variable matrix
+                  N_obs = length(unique(dat_sub$time))) # number of observations
+
+# R code for fitting the model here
+mod <- stan(model_code = mymodel2, data = dsem_list, 
+            verbose = FALSE, iter = 4000, chains = 4, 
+            cores = 4, init = 0)
+
+# View results
+print(mod, digits = 3, pars = c('gamma','tau'))
+plot(mod, pars = c('gamma','tau'))
+stan_dens(mod, pars = c('gamma','tau'))
+```
+
+Congratulations! You are now able to fit a three-parameter DSEM on timeseries data including both fixed and random effects. Hopefully, you became a bit familiar with Stan blocks, data and variables types, and where to change and add declarations when expanding your model.
+
+### Between-subject correlations
+
+The previous DSEM you just specified is pretty neat, but it makes a strong assumption: the between-subject variance in each of our three parameters is completely independent! So, in this step we will learn how to estimate between-subject correlations between all of our three parameters. 
+
+**Exercise 16** To estimate the covariance between the subject-specific deviations of each parameter we assume that the subject-specific deviations are drawn from a multivariate normal distribution, u[i] ~ $N(0,\Sigma)$, where $\Sigma$ is a covariance matrix with the variance of each parameter ($\tau^2$) on the diagonal and their covariance on the off-diagonals. We can reconstruct the covariance matrix from the vector of standard deviations reflecting the variability in subject-specific deviations (tau) and a correlation matrix (R), using this function `diag_matrix(tau)* R *diag_matrix(tau)`. But first can you specify correlation matrix R in Stan for three parameters?
+
+```{r ans_step16}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    array[N_subj] vector[3] u; // deviations
+    corr_matrix[3] R; // correlation matrix
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    tau ~ cauchy(0,2.5);        // prior on random effects
+    
+    for (i in 1:N_subj) {
+      u[i] ~ multi_normal(rep_vector(0,3), // vector of means
+      quad_form_diag(R,tau)); // Sigma = diag_matrix(tau)* R *diag_matrix(tau);
+      
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+Now that we have our correlation matrix, we need to go to the model block and adjust the distribution of our subject-specific deviations $u$ to a multivariate normal distribution, $MVN ~ (0, \Sigma)$. To generate $\Sigma$ from a vector of standard deviations (tau) and a correlation matrix (R). you can use the function `diag_matrix(tau)* R *diag_matrix(tau)`. *Tip:* Stan has shorthand to do this.
+
+
+```{r ans_step17}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    array[N_subj] vector[3] u; // deviations
+    corr_matrix[3] R; // correlation matrix
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    tau ~ cauchy(0,2.5);        // prior on random effects
+    
+    for (i in 1:N_subj) {
+      u[i] ~ multi_normal(rep_vector(0,3), // vector of means
+      quad_form_diag(R,tau)); // Sigma = diag_matrix(tau)* R *diag_matrix(tau);
+      
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+Finally, we need to specify a prior to reflect the potential correlation between the subject-specific deviations of different parameters. Can you specify a sensible prior for the correlation matrix (R)?
+
+```{r ans_step19}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    array[N_subj] vector[3] u; // deviations
+    corr_matrix[3] R; // correlation matrix
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    tau ~ cauchy(0,2.5);        // prior on random effects
+    
+    R ~ lkj_corr(2); // prior for the correlation structure 
+    
+    for (i in 1:N_subj) {
+      u[i] ~ multi_normal(rep_vector(0,3), // vector of means
+      quad_form_diag(R,tau)); // Sigma = diag_matrix(tau)* R *diag_matrix(tau);
+      
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+"
+```
+
+Now you can try and fit this model! 
+
+```{r class.source = "fold-show" , eval=TRUE, message=FALSE,warning=FALSE}
+library(rstan)
+
+# Randomly select 20 participants (or more up to 100)
+subsample <- sample(unique_id, size = 20)
+dat_sub <- dat %>% filter(subject %in% subsample)
+
+#Make list of variables and values for DSEM (N = 20)
+dsem_list <- list(N_subj = length(unique(dat_sub$subject)), # subject number
+                  Y = matrix(dat_sub$urge, 
+                             length(unique(dat_sub$subject)), 
+                             byrow = TRUE), # outcome variable matrix
+                  N_obs = length(unique(dat_sub$time))) # number of observations
+
+# R code for fitting the model here
+mod <- stan(model_code = mymodel2, data = dsem_list, 
+            verbose = FALSE, iter = 4000, chains = 4, 
+            cores = 4, init = 0)
+
+# View results
+print(mod, digits = 3, pars = c('gamma','tau', 'R'))
+plot(mod, pars = c('gamma','tau','R'))
+stan_dens(mod, pars = c('gamma','tau','R'))
+
+```
+
+Before our three parameter DSEM with a correlation structure is complete, we need to reparameterize our Stan code which will help estimation in the case where there dependencies between samples. In such cases, the sampler has a difficult time exploring the parameter space.
+
+To reparameterize our model we need to use Cholesky factorization. This will require a few lines of code and the introduction of a new code block, the `transformed parameters` block. Here we will just go through the additional code to achieve this parameterization of our model. If you want to gain a deeper understanding of why this works and the problems that it solves then please see: For more information on this issue see for an excellent overview: https://bruno.nicenboim.me/bayescogsci/ch-complexstan.html#sec-corrstan.
+
+First, we need to define a 3x3 lower triangular matrix for the Cholesky factor of our correlation matrix. This is done in the parameters block, using the following function `L_u = cholesky_factor_corr[3]`. We also need to generate a matrix of uncorrelated vectors of deviations for each parameter, as sampled from a standard normal distribution ($N~(0,1)$). Now we need to open a new code block, the `transformed parameters`, where we can define variables that are a function of our data and/or parameters. Within this new block, we will define a matrix to store the correlated deviations `u` that we generate by multiplying the Cholesky factor `L_u` with the `z_u`'s and scaling their product using the diagonal matrix of random effects `diag_matrix(tau)`, `u = (diag_pre_multiply(tau, L_u) * z_u)'`. Finally, to generate the correlation matrix in our output we can multiply the Cholesky factor (`L_u`) with its transpose `L_u'`.
+
+```{r ans_step18}
+
+mymodel2 = "
+  data {
+    int<lower=1> N_obs;         // number of observations
+    int<lower=1> N_subj;        // number of subjects
+    array[N_subj] vector[N_obs] Y;  // timeseries data
+  }
+  
+  parameters {
+    vector[3] gamma;        // fixed effects
+    vector<lower=0>[3] tau; // random effects
+    matrix[3, N_subj] z_u;
+    cholesky_factor_corr[3] L_u; // Cholesky factor
+  }
+  
+  transformed parameters {
+  
+  matrix[N_subj, 3] u;
+  u = (diag_pre_multiply(tau, L_u) * z_u)';
+  
+  }
+  
+  model {
+    vector[N_subj] mu;          // mean
+    vector[N_subj] psi;         // residual sd
+    vector[N_subj] phi;         // autoregression
+    
+    gamma ~ normal(0, 1e6);     // prior on fixed effects
+    tau ~ cauchy(0,2.5);        // prior on random effects
+    
+    L_u ~ lkj_corr_cholesky(2); // prior for the correlation structure
+    
+    to_vector(z_u) ~ std_normal(); // scaled deviations
+    
+    for (i in 1:N_subj) {
+      mu[i] = gamma[1] + u[i][1];              // subject-specific mean 
+      psi[i] = exp(gamma[2] + u[i][2]);        // subject-specific sd 
+      phi[i] = gamma[3] + u[i][3];             // subject-specific autoregression 
+      
+      Y[i][1] ~ normal(mu[i], psi[i]); // estimate first observation
+      for (t in 2:N_obs) {
+        Y[i][t] ~ normal(mu[i] + phi[i]*(Y[i][t-1] - mu[i]), psi[i]); // three-parameter DSEM
+      }
+    }
+  }
+  
+  generated quantities {
+    corr_matrix[3] rho_u = L_u * L_u';
+  }
+"
+```
+
+You can now fit the reparameterized DSEM using the familiar syntax.
+
+```{r class.source = "fold-show", eval=TRUE, message=FALSE,warning=FALSE}
+library(rstan)
+
+# Randomly select 20 participants (or more up to 100)
+subsample <- sample(unique_id, size = 20)
+dat_sub <- dat %>% filter(subject %in% subsample)
+
+#Make list of variables and values for DSEM (N = 20)
+dsem_list <- list(N_subj = length(unique(dat_sub$subject)), # subject number
+                  Y = matrix(dat_sub$urge, 
+                             length(unique(dat_sub$subject)), 
+                             byrow = TRUE), # outcome variable matrix
+                  N_obs = length(unique(dat_sub$time))) # number of observations
+
+# R code for fitting the model here
+mod <- stan(model_code = mymodel2, data = dsem_list, 
+            verbose = FALSE, iter = 4000, chains = 4, 
+            cores = 4, init = 0)
+
+# View results
+print(mod, digits = 3, pars = c('gamma','tau', 'rho_u'))
+plot(mod, pars = c('gamma','tau','rho_u'))
+stan_dens(mod, pars = c('gamma','tau','rho_u'))
+
+```
+
+Do not hesitate to contact Michael or Jessica with further questions!
